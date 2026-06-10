@@ -131,3 +131,76 @@ A single collection named `notifications` will be used.
         }).sort({ "createdAt": -1 });
         ```
         *   This is a very common query that will become slow as the number of notifications per user grows. A composite index on `(userId, isRead, createdAt)` would be needed to optimize this.
+
+---
+
+## Stage 3: Database Performance & Optimization
+
+This section analyzes the performance of the notification query and proposes an optimal index.
+
+### Slow Query Analysis
+
+The provided query is:
+`SELECT * FROM notifications WHERE student_id = 1234 AND isRead = false ORDER BY createdAt DESC;`
+
+*   **Why it is slow:** Without a proper index, the database has to perform a full scan of the `notifications` table. As the table grows with millions of records, this operation becomes increasingly slow. It would have to load a massive number of records into memory to filter by `student_id` and `isRead`, and then sort them.
+
+*   **Why indexing every column is bad:**
+    *   **Write Performance:** Every time a record is inserted, updated, or deleted, every index on the table must also be updated. This adds significant overhead to write operations.
+    *   **Storage Overhead:** Each index consumes additional disk space. With many indexes, this can become substantial.
+    *   **Query Planner Complexity:** While the query planner is smart, having too many indexes can sometimes lead it to choose a suboptimal index for a particular query, resulting in poor performance.
+
+### Optimal Composite Index
+
+To optimize the query, a composite index should be created. The order of columns in the index is crucial.
+
+*   **Optimal Index Definition:**
+    ```sql
+    CREATE INDEX idx_notifications_student_read_created
+    ON notifications (student_id, isRead, createdAt DESC);
+    ```
+
+*   **Justification:**
+    1.  `student_id`: This is the most selective filter and should be first. The database can quickly narrow down the search to a specific user.
+    2.  `isRead`: This is the next filter. After selecting the user, the database can further filter by the read status.
+    3.  `createdAt DESC`: Including this in the index allows the database to retrieve the data in the already sorted order, avoiding a costly sorting operation.
+
+---
+
+## Stage 4: High-Throughput Mitigation Strategies
+
+This section proposes strategies to handle high-frequency page loads.
+
+### 1. Caching Layer with Redis
+
+A Redis caching layer can be introduced to dramatically reduce database load.
+
+*   **Strategy:**
+    1.  When a user requests their notifications, first check if they exist in the Redis cache for that `userId`.
+    2.  **Cache Hit:** If found, return the notifications directly from Redis. This is extremely fast.
+    3.  **Cache Miss:** If not found, query the database, store the result in Redis with a Time-To-Live (TTL, e.g., 1-5 minutes), and then return the result to the user.
+    4.  **Write-through/Write-around:** When a new notification is created, it can be pushed to the cache (or the cache for that user can be invalidated) to ensure the cache doesn't become stale. For marking as read, the cache should be updated or invalidated.
+
+*   **Benefit:** This significantly reduces the number of read queries hitting the primary database, improving performance and scalability.
+
+### 2. Cursor Pagination
+
+Standard offset-based pagination (`LIMIT`/`OFFSET`) becomes inefficient with large datasets because the database still has to scan through the `OFFSET` number of rows.
+
+*   **Strategy:** Cursor-based pagination uses a "cursor" (a pointer to a specific record in the dataset) to fetch the next set of results. The cursor is typically the value of the column the data is sorted by from the last item in the previous set.
+
+*   **Example Flow:**
+    1.  **Initial Request:** `GET /notifications?userId=user_abc&limit=20`
+    2.  **Response:** Returns the first 20 notifications and includes a `nextCursor` which could be the `createdAt` timestamp of the last notification.
+    3.  **Next Request:** `GET /notifications?userId=user_abc&limit=20&cursor=2026-06-10T09:00:00Z`
+    4.  The backend query would then be:
+        ```sql
+        SELECT * FROM notifications
+        WHERE student_id = 1234 AND isRead = false AND createdAt < '2026-06-10T09:00:00Z'
+        ORDER BY createdAt DESC
+        LIMIT 20;
+        ```
+
+*   **Tradeoffs:**
+    *   **Pros:** Very efficient for large datasets as it avoids the `OFFSET` scan. It provides stable pagination even if new items are added to the list.
+    *   **Cons:** It's more complex to implement on the client and server. It doesn't allow jumping to a specific page (e.g., page 5) directly. The client can only go to the next or previous page.
