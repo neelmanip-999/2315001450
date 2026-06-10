@@ -296,3 +296,27 @@ To address these issues, an asynchronous Message Queue (like RabbitMQ or AWS SQS
     *   **Reliability & Retries:** The background worker can handle failures and retry jobs, ensuring notifications are not lost due to transient errors.
     *   **Scalability:** You can run multiple instances of the `notification_worker` to process notifications in parallel, allowing the system to handle a very high throughput.
     *   **Decoupling:** The API is decoupled from the notification sending logic. This makes the system more resilient and easier to maintain.
+
+---
+
+## Stage 6: Priority Inbox Implementation
+
+This section explains the architectural choices for implementing a priority inbox.
+
+### Architectural Choices
+
+To maintain the Top 'n' unread notifications, a **Min-Heap** based Priority Queue is the ideal data structure.
+
+*   **Why a Min-Heap?**
+    *   A Min-Heap always keeps the element with the lowest priority at the root. In our case, we can define a custom comparator so that the "least important" notification is at the root.
+    *   When a new notification arrives, we can compare it with the root of the heap. If the new notification is more important, we can remove the root and insert the new notification. This operation is very efficient (O(log n)).
+    *   This allows us to maintain a constant size ('n') heap of the most important notifications at all times.
+
+*   **Priority Sorting:**
+    1.  **Custom Weights:** The priority will be determined by a custom weight assigned to each notification type:
+        *   `Placement`: 3 (highest priority)
+        *   `Result`: 2
+        *   `Event`: 1 (lowest priority)
+    2.  **Recency:** If two notifications have the same weight, the more recent one (based on `Timestamp`) will be considered higher priority.
+
+This approach ensures that we can efficiently process a stream of notifications and always have the top 'n' most important ones ready to be displayed.
