@@ -85,6 +85,7 @@ const knapsack = (items, capacity) => {
 const runScheduler = async () => {
     await registerAndAuthenticate();
     if (!token) {
+        await log('fatal', 'scheduler', 'Could not authenticate. Aborting.', token);
         return;
     }
 
@@ -109,9 +110,8 @@ const runScheduler = async () => {
         await log('info', 'scheduler', `Scheduled tasks for depot ${ID}.`, token);
     }
 
-    // The output should be handled as requested, which might not be console.log in a real scenario.
-    // For this test, we will just log the completion.
-    await log('info', 'scheduler', `Finished scheduling. Final results: ${JSON.stringify({ "schedules": results })}`, token);
+    console.log(JSON.stringify({ "schedules": results }, null, 2));
+    await log('info', 'scheduler', 'Finished scheduling for all depots.', token);
 };
 
 runScheduler();
