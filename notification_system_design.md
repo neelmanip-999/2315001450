@@ -204,3 +204,95 @@ Standard offset-based pagination (`LIMIT`/`OFFSET`) becomes inefficient with lar
 *   **Tradeoffs:**
     *   **Pros:** Very efficient for large datasets as it avoids the `OFFSET` scan. It provides stable pagination even if new items are added to the list.
     *   **Cons:** It's more complex to implement on the client and server. It doesn't allow jumping to a specific page (e.g., page 5) directly. The client can only go to the next or previous page.
+
+---
+
+## Stage 5: Reliable Broadcast System
+
+This section analyzes the provided pseudocode for sending notifications and proposes a more reliable, asynchronous architecture.
+
+### Analysis of Blocking Sequential Pseudocode
+
+The provided pseudocode is:
+```
+function notify_all(student_ids, message) {
+  for student_id in student_ids {
+    send_email(student_id, message)  // calls Email API
+    save_to_db(student_id, message)  // DB insert
+    push_to_app(student_id, message) // calls Notification service
+  }
+}
+```
+
+*   **Failure Edge Cases:**
+    1.  **Midway Failure:** If any of the `send_email`, `save_to_db`, or `push_to_app` calls fail for a student, the entire loop for that student stops, and subsequent students in the list will not be notified.
+    2.  **Blocking Operation:** The loop is synchronous and blocking. If there are 50,000 students, this function will take a very long time to complete, likely leading to a request timeout.
+    3.  **No Retries:** If an API call fails due to a transient network issue, there is no mechanism to retry the operation. The notification for that student will be lost.
+    4.  **Database Contention:** High-frequency, sequential database inserts can cause contention and slow down the process.
+
+### Asynchronous Message Queue Redesign
+
+To address these issues, an asynchronous Message Queue (like RabbitMQ or AWS SQS) architecture is proposed.
+
+*   **Revised, Non-blocking Pseudocode:**
+
+    **1. API Endpoint (The part that receives the initial request)**
+    ```
+    // This function is now very fast and non-blocking.
+    function notify_all_async(student_ids, message) {
+      // Get a connection to the message queue
+      const queue = get_message_queue('notification_jobs');
+
+      for student_id in student_ids {
+        // Create a job payload
+        const job = {
+          student_id: student_id,
+          message: message,
+          retry_count: 0
+        };
+
+        // Enqueue the job. This is a very fast, non-blocking operation.
+        queue.add(job);
+      }
+
+      // Immediately return a success response to the client.
+      return { "status": "Notifications are being processed." };
+    }
+    ```
+
+    **2. Background Worker**
+    ```
+    // This runs as a separate, persistent process.
+    // You can have many workers running in parallel to process jobs.
+    function notification_worker() {
+      const queue = get_message_queue('notification_jobs');
+      const dead_letter_queue = get_message_queue('failed_notification_jobs');
+
+      // Continuously listen for new jobs on the queue.
+      queue.process(async (job) => {
+        try {
+          // Process the job
+          await send_email(job.student_id, job.message);
+          await save_to_db(job.student_id, job.message);
+          await push_to_app(job.student_id, job.message);
+
+        } catch (error) {
+          // If processing fails, implement a retry mechanism.
+          if (job.retry_count < 3) { // e.g., max 3 retries
+            job.retry_count++;
+            // Re-queue the job with an exponential backoff delay.
+            queue.add(job, { delay: 60000 * job.retry_count });
+          } else {
+            // If it fails after all retries, move it to a dead-letter queue for manual inspection.
+            dead_letter_queue.add(job);
+          }
+        }
+      });
+    }
+    ```
+
+*   **Benefits of this design:**
+    *   **Non-blocking & Fast:** The API endpoint is now extremely fast as it only has to enqueue jobs.
+    *   **Reliability & Retries:** The background worker can handle failures and retry jobs, ensuring notifications are not lost due to transient errors.
+    *   **Scalability:** You can run multiple instances of the `notification_worker` to process notifications in parallel, allowing the system to handle a very high throughput.
+    *   **Decoupling:** The API is decoupled from the notification sending logic. This makes the system more resilient and easier to maintain.
